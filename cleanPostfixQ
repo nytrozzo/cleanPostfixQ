@@ -1,0 +1,141 @@
+#!/usr/local/bin/bash
+
+defaultFilters="sex|sexe|anal|cums|stinking rich|mistress|easy money|successful|rich|housewife|slave|A nice piece of text|X-Spam: yes|great chance|E-mail deactivated|turbo345@interia.pl|change your life|Pedigree Chart|belle studentesse|studentessa|pantherswroclaw|Trabajo gog|ganar millones|Ti piace leccare|te quiero complacer|wklm.it|Mamy realne ankiety|Belles_=C3=A9tudiantes_te_cherchent|partnera|Zapoznamy|seksu|deferred"
+
+WORKINGDIR='/root/cleanPostfixQ_stats/'
+
+_usage(){
+cat << EOF
+ ~ Usage : $0 [OPTIONS] [REGEX]
+
+ Options:
+ --------
+ # Options
+ -dbs |--deletebysender : Delete queued email when matching sender regex
+ -dbc |--delbycontent : Delete queued email when matching content regex
+ -y : Force 'yes' answer before deleting -  can by added on option -dbs while used in crontab or script
+
+ NOTES : 
+ - The option -dbc, if used with no regex, will use a default pattern included in the program.
+ - -dbc option include by default the deletion of MAILER-DAEMON email
+ - [REGEX] has the format interpreted by grep -E ''
+
+ Example of uses :
+ $0 -dbs -y MAILER-DAEMON
+ $0 -dbs 'MAILER-DAEMON|titi@toto.com|loveyou.cz'
+ $0 -dbc 
+ $0 -dbc 'sex|easy money|offshore|nice student'
+
+ Default spam regex in use :
+ echo $defaultFilters
+
+EOF
+exit 1
+}
+
+# We get out if at least one argument isn't passed
+[[ "$@" -lt '1' ]] && _usage
+
+# We create the stats DIR before go
+test -d $WORKINGDIR || install -d -m 770 $WORKINGDIR || (echo "We can create stats DIR - exit"; _usage)
+
+###############
+## Functions ##
+###############
+_list_sample(){
+	postqueue -p | grep -E '^[0-9A-Z]{12}'
+}
+
+_stats_state(){
+
+	senders=$(postqueue -p | grep -E '^[A-Z0-9]{12}' | awk '{print $7}' | sort | uniq -c | sort)
+	echo "$senders"
+
+}
+
+_clean_by_sender(){
+	forceYES="$1"
+	if [ "$forceYES" == '-y' ]
+	then
+		noConfirmation='1'
+		shift 1
+	else
+		noConfirmation='0'
+	fi
+	sender_to_clean="$@"
+	id_to_del=$(postqueue -p | grep -E '^[0-9A-Z]{12}' | grep -E "$@" | awk '{print $1 " " $7}' | tr -d '*')
+	total=$(echo "$id_to_del" | wc -l)
+	echo "$id_to_del"
+	echo "Total : $total"
+	if [ "$noConfirmation" == "1" ]
+	then
+		postqueue -p | grep -E '^[0-9A-Z]{12}' | grep -E "$@" | awk '{print $1}' | tr -d '*' | postsuper -d - && echo OK || echo NOK
+	else
+		echo "Are you OK to remove all those emails ? [yes|N]"
+		read answer
+		if [ "$answer" = 'yes' ]
+		then
+			postqueue -p | grep -E '^[0-9A-Z]{12}' | grep -E "$@" | awk '{print $1}' | tr -d '*' | postsuper -d - && echo OK || echo NOK
+		else	
+			echo "You choosed patience - exit"
+		fi 
+	fi
+}
+
+_clean_by_content(){
+	filters="$@"
+	if [[ "$filters" == '' ]]
+	then
+		filters="$defaultFilters"
+	fi
+	potential_spammer_file="${WORKINGDIR}/potential_spammers_$(date +"%Y%m%d_%H%M").txt"
+	list_mailq_data=$(postqueue -p | grep -E '^[0-9A-Z]{12}' | awk '{print $1":"$7}' | tr -d '*')
+	total_in_q=$(echo "$list_mailq_data" | wc -l)
+	echo "Mailqueue contains $total_in_q emails"
+	echo "Checking emails containing regex : $filters"
+	for line in $list_mailq_data
+	do
+		mail_id=$(echo $line | awk -F":" '{print $1}')
+		#echo $mail_id | grep F0AFF280A8BE && echo "found" && exit
+		mail_sender=$(echo $line | awk -F":" '{print $2}')
+		#echo "id : $mail_id - sender : $mail_sender"
+		if [ "$mail_sender" = "MAILER-DAEMON" ]
+		then
+			echo -n "Deleting email $mail_id - sender : $mail_sender ... : "
+			postsuper -d $mail_id 2>/dev/null && echo OK || echo NOK
+		fi
+		# Here we go with the content
+			content=$(postcat -q $mail_id 2>/dev/null)
+#		if [[ "$content" =~ $filters ]]
+		if [[ "$(echo "$content" | grep -E "$filters" )" != '' ]]
+		then
+			echo $mail_sender >> $potential_spammer_file
+			echo -n "$mail_id would be deleted because match with regex $filters... : "
+			postsuper -d $mail_id 2>/dev/null && echo OK || echo NOK
+		fi
+	done
+}
+
+case $1 in
+	--list|-l)
+		_list_sample
+	;;
+
+	--stats|-s)
+		_stats_state
+	;;
+
+	--delbysender|-dbs)
+		shift 1
+		_clean_by_sender $@
+	;;
+
+	--delbycontent|-dbc)
+		shift 1
+		_clean_by_content $@
+	;;
+
+	*)
+		_usage
+	;;
+esac
